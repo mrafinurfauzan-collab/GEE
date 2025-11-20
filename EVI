@@ -1,0 +1,53 @@
+// 1) Base S2 SR collection
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(region)
+  .filterDate('2024-12-01', '2025-09-01');
+
+// 2) Per-pixel cloud/shadow mask using SCL
+function maskS2(img) {
+  var scl = img.select('SCL');
+  var mask = scl.neq(3)   // cloud shadow
+             .and(scl.neq(8))  // medium cloud
+             .and(scl.neq(9))  // high cloud
+             .and(scl.neq(10)) // thin cirrus
+             .and(scl.neq(11)); // snow/ice (optional)
+  return img.updateMask(mask);
+}
+
+// (optional) also keep overall “cleaner” scenes
+var s2Masked = s2.filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 40))
+                 .map(maskS2);
+
+// 3) Main composite
+var imgMed = s2Masked.median();
+
+// 4) Fallback to fill gaps: wider dates or looser clouds
+var s2Fallback = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(region)
+  .filterDate('2023-10-01', '2025-07-01')  // wider window
+  .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 80))
+  .map(maskS2)
+  .median();
+
+// 5) Merge to get full coverage
+var imgFilled = imgMed.unmask(s2Fallback);
+
+// 6) Compute EVI
+var evi = imgFilled.expression(
+  '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))', {
+    'NIR': imgFilled.select('B8').divide(10000),
+    'RED': imgFilled.select('B4').divide(10000),
+    'BLUE': imgFilled.select('B2').divide(10000)
+  });
+
+var EVI = evi.clip(region);
+
+Map.centerObject(region, 12);
+Map.addLayer(EVI, {min: -1, max: 1, palette: ['black','white','green']}, 'EVI');
+
+// 7) Export (force numeric fill if you prefer)
+Export.image.toDrive({ image: EVI, description: 'EVI_kabangun_2025',
+folder: 'GEE_Export',
+scale: 10,
+maxPixels: 1e10,
+region: region });
