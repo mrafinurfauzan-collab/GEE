@@ -1,0 +1,81 @@
+
+// =====================================================
+// DOWNLOAD SENTINEL-2 SR HARMONIZED
+// Periode: Januari - Juni 2026
+// Output: GeoTIFF ke Google Drive
+// =====================================================
+
+// 1. Tentukan wilayah kajian
+// Pastikan variabel 'region' sudah didefinisikan
+// melalui Geometry atau FeatureCollection.
+
+// 2. Ambil koleksi Sentinel-2
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(region)
+  .filterDate('2026-01-01', '2026-07-01')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 70));
+
+print('Jumlah citra Sentinel-2:', s2.size());
+print('Daftar citra:', s2);
+
+// 3. Masking awan dan bayangan awan menggunakan SCL
+function maskS2Clouds(image) {
+  var scl = image.select('SCL');
+
+  var mask = scl.neq(3)   // Cloud shadow
+    .and(scl.neq(8))     // Cloud, medium probability
+    .and(scl.neq(9))     // Cloud, high probability
+    .and(scl.neq(10))    // Cirrus
+    .and(scl.neq(11));   // Snow / ice
+
+  return image
+    .updateMask(mask)
+    .select(['B2', 'B3', 'B4', 'B8', 'B11', 'B12'])
+    .copyProperties(image, ['system:time_start']);
+}
+
+// 4. Terapkan masking
+var s2Masked = s2.map(maskS2Clouds);
+
+// 5. Buat komposit median
+var composite = s2Masked
+  .median()
+  .clip(region)
+  .toFloat();
+
+// 6. Tampilkan citra pada peta
+Map.centerObject(region, 11);
+
+Map.addLayer(
+  composite,
+  {
+    bands: ['B4', 'B3', 'B2'],
+    min: 0,
+    max: 3000
+  },
+  'Sentinel-2 RGB Median 2026'
+);
+
+Map.addLayer(
+  composite,
+  {
+    bands: ['B8', 'B4', 'B3'],
+    min: 0,
+    max: 4000
+  },
+  'Sentinel-2 False Color'
+);
+
+Map.addLayer(region, {}, 'Wilayah Kajian');
+
+// 7. Ekspor ke Google Drive
+Export.image.toDrive({
+  image: composite,
+  description: 'Sentinel2_SR_Median_Jan_Jun_2026',
+  folder: 'GEE_Export',
+  fileNamePrefix: 'Sentinel2_SR_Median_Jan_Jun_2026',
+  region: region,
+  scale: 10,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
