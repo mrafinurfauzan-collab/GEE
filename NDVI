@@ -1,52 +1,152 @@
-// 1) Base S2 SR collection
-var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-  .filterBounds(region) // ini batas shpnya diupload
-  .filterDate('2024-12-01', '2025-09-01');
+// ======================================================
+// NDVI SENTINEL-2 TAHUN 2017
+// TEMPORAL CLOUD GAP FILLING
+// ======================================================
 
-// 2) Per-pixel cloud/shadow mask using SCL
-function maskS2(img) {
-  var scl = img.select('SCL');
-  var mask = scl.neq(3)   // cloud shadow
-             .and(scl.neq(8))  // medium cloud
-             .and(scl.neq(9))  // high cloud
-             .and(scl.neq(10)) // thin cirrus
-             .and(scl.neq(11)); // snow/ice (optional)
-  return img.updateMask(mask);
-}
-
-// (optional) also keep overall “cleaner” scenes
-var s2Masked = s2.filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 40))
-                 .map(maskS2);
-
-// 3) Main composite
-var imgMed = s2Masked.median();
-
-// 4) Fallback to fill gaps: wider dates or looser clouds
-var s2Fallback = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-  .filterBounds(region)
-  .filterDate('2023-10-01', '2025-07-01')  // wider window
-  .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 80))
-  .map(maskS2)
-  .median();
-
-// 5) Merge to get full coverage
-var imgFilled = imgMed.unmask(s2Fallback);
-
-// 6) Compute ndvi
-var ndvi = imgFilled.expression(
-  '((NIR - RED) / (NIR + RED))', {
-    'NIR': imgFilled.select('B8').divide(10000),
-    'RED': imgFilled.select('B4').divide(10000),
-      });
-
-var ndvi = ndvi.clip(region);
+// 1. REGION PENELITIAN
 
 Map.centerObject(region, 12);
-Map.addLayer(ndvi, {min: -1, max: 1, palette: ['black','white','green']}, 'ndvi');
 
-// 7) Export (force numeric fill if you prefer)
-Export.image.toDrive({ image: ndvi, description: 'NDVI_MSW_2025',
-folder: 'GEE_Export',
-scale: 10,
-maxPixels: 1e10,
-region: region });
+
+// 2. PERIODE UTAMA
+
+var startDate = '2017-03-01';
+var endDate   = '2017-10-01';
+
+
+// 3. SENTINEL-2 SURFACE REFLECTANCE HARMONIZED
+// Dataset ini memiliki band SCL
+
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(region)
+  .filterDate(startDate, endDate);
+
+print('Jumlah citra awal:', s2.size());
+
+
+// 4. MASKING AWAN MENGGUNAKAN SCL
+
+function maskS2(img) {
+
+  var scl = img.select('SCL');
+
+  var mask = scl.neq(0)    // No data
+    .and(scl.neq(1))       // Saturated / defective
+    .and(scl.neq(3))       // Cloud shadow
+    .and(scl.neq(8))       // Medium probability cloud
+    .and(scl.neq(9))       // High probability cloud
+    .and(scl.neq(10))      // Cirrus
+    .and(scl.neq(11));     // Snow / ice
+
+  return img.updateMask(mask)
+    .copyProperties(img, ['system:time_start']);
+}
+
+
+// 5. MASKING CITRA PERIODE UTAMA
+
+var s2Main = s2
+  .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 80))
+  .map(maskS2);
+
+print('Jumlah citra utama:', s2Main.size());
+
+
+// 6. KOMPOSIT UTAMA
+
+var compositeMain = s2Main.median();
+
+
+// 7. FALLBACK SELURUH TAHUN 2017
+// Menggunakan dataset yang sama dengan komposit utama
+
+var s2Fallback = ee.ImageCollection(
+    'COPERNICUS/S2_SR_HARMONIZED'
+  )
+  .filterBounds(region)
+  .filterDate('2017-01-01', '2018-01-01')
+  .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 100))
+  .map(maskS2);
+
+print('Jumlah citra fallback:', s2Fallback.size());
+
+
+// 8. KOMPOSIT FALLBACK
+
+var compositeFallback = s2Fallback.median();
+
+
+// 9. TEMPORAL CLOUD GAP FILLING
+
+var imgFilled = compositeMain.unmask(
+  compositeFallback, false
+);
+
+
+// 10. HITUNG NDVI
+
+var ndvi = imgFilled
+  .normalizedDifference(['B8', 'B4'])
+  .rename('NDVI')
+  .clip(region);
+
+
+// 11. VISUALISASI NDVI
+
+Map.addLayer(
+  ndvi,
+  {
+    min: -1,
+    max: 1,
+    palette: ['blue', 'white', 'green']
+  },
+  'NDVI 2017 Cloud-Free'
+);
+
+
+// 12. VISUALISASI RGB
+
+Map.addLayer(
+  imgFilled,
+  {
+    bands: ['B4', 'B3', 'B2'],
+    min: 0,
+    max: 3000
+  },
+  'RGB Composite 2017',
+  false
+);
+
+
+// 13. CEK HASIL
+
+print('Komposit utama:', compositeMain);
+print('Komposit fallback:', compositeFallback);
+print('Hasil gap filling:', imgFilled);
+print('NDVI 2017:', ndvi);
+
+
+// 14. EXPORT NDVI
+
+Export.image.toDrive({
+  image: ndvi,
+  description: 'NDVI_2017_CloudFree',
+  folder: 'GEE_Export',
+  fileNamePrefix: 'NDVI_2017_CloudFree',
+  region: region,
+  scale: 10,
+  maxPixels: 1e13
+});
+
+
+// 15. EXPORT CITRA KOMPOSIT
+
+Export.image.toDrive({
+  image: imgFilled.select(['B2', 'B3', 'B4', 'B8']),
+  description: 'S2_Composite_2017_CloudFree',
+  folder: 'GEE_Export',
+  fileNamePrefix: 'S2_Composite_2017_CloudFree',
+  region: region,
+  scale: 10,
+  maxPixels: 1e13
+});
